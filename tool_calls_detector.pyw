@@ -256,6 +256,7 @@ ALL_TOOLSETS = [TOOLSET_ARITHMETIC, TOOLSET_WEATHER, TOOLSET_SEARCH, TOOLSET_MUL
 
 PRESETS = {
     "OpenAI": {"url": "https://api.openai.com", "models": "gpt-4o,gpt-4o-mini,gpt-3.5-turbo"},
+    "Anthropic": {"url": "https://api.anthropic.com", "models": "claude-sonnet-4-20250514,claude-haiku-4-20250414"},
     "Kimi (Moonshot)": {"url": "https://api.moonshot.cn", "models": "kimi-k2.6,moonshot-v1-8k"},
     "DeepSeek": {"url": "https://api.deepseek.com", "models": "deepseek-chat,deepseek-reasoner"},
     "硅基流动 SiliconFlow": {"url": "https://api.siliconflow.cn", "models": "Qwen/Qwen2.5-7B-Instruct"},
@@ -264,6 +265,10 @@ PRESETS = {
 
 # ── 核心检测逻辑 ────────────────────────────────────────────────────
 
+def _is_anthropic(base_url: str) -> bool:
+    return "anthropic" in base_url.lower()
+
+
 def _build_url(base_url: str) -> str:
     b = base_url.rstrip("/")
     if b.endswith("/v1"):
@@ -271,9 +276,121 @@ def _build_url(base_url: str) -> str:
     return b + "/v1/chat/completions"
 
 
+def _openai_tools_to_anthropic(tools):
+    """OpenAI tools → Anthropic input_schema 格式"""
+    out = []
+    for t in tools:
+        fn = t.get("function", {})
+        out.append({
+            "name": fn.get("name", ""),
+            "description": fn.get("description", ""),
+            "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+        })
+    return out
+
+
+def _make_result(model, tool_choice=None):
+    return {
+        "model": model, "supported": False, "detection_method": None,
+        "tool_calls": None, "function_name": None, "arguments": None,
+        "finish_reason": None, "raw_response": None, "error": None,
+        "latency": None, "status_code": None, "parallel_count": 0,
+        "tool_choice_used": tool_choice,
+    }
+
+
+def _check_single_anthropic(base_url, api_key, model, tools, prompt,
+                            timeout=30, verify_ssl=True, tool_choice=None):
+    """Anthropic Messages API 检测"""
+    url = f"{base_url.rstrip('/')}/v1/messages"
+    anthropic_tools = _openai_tools_to_anthropic(tools)
+
+    payload = {
+        "model": model,
+        "max_tokens": 512,
+        "messages": [{"role": "user", "content": prompt}],
+        "tools": anthropic_tools,
+    }
+    # Anthropic tool_choice: {"type": "auto"} / {"type": "any"} / {"type": "tool", "name": "..."}
+    if tool_choice == "required":
+        payload["tool_choice"] = {"type": "any"}
+    elif isinstance(tool_choice, dict) and "function" in tool_choice:
+        fn_name = tool_choice["function"]["name"]
+        payload["tool_choice"] = {"type": "tool", "name": fn_name}
+    # else: auto (default, no need to set)
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+    }
+
+    result = _make_result(model, tool_choice)
+
+    try:
+        import urllib3
+        if not verify_ssl:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        t0 = time.time()
+        resp = requests.post(url, json=payload, headers=headers,
+                             timeout=timeout, verify=verify_ssl)
+        result["latency"] = round(time.time() - t0, 2)
+        result["status_code"] = resp.status_code
+
+        if resp.status_code != 200:
+            result["error"] = f"HTTP {resp.status_code}: {resp.text[:500]}"
+            return result
+
+        data = resp.json()
+        result["raw_response"] = data
+
+        stop_reason = data.get("stop_reason", "")
+        result["finish_reason"] = stop_reason
+        content = data.get("content", [])
+
+        # 提取 tool_use blocks
+        tool_uses = [b for b in content if b.get("type") == "tool_use"]
+
+        if tool_uses:
+            result["supported"] = True
+            result["detection_method"] = "content[].type=tool_use"
+            result["tool_calls"] = tool_uses
+            result["parallel_count"] = len(tool_uses)
+            first = tool_uses[0]
+            result["function_name"] = first.get("name", "-")
+            result["arguments"] = json.dumps(first.get("input", {}), ensure_ascii=False)
+            if len(tool_uses) > 1:
+                result["function_name"] += f" (+{len(tool_uses)-1})"
+        elif stop_reason == "tool_use":
+            result["supported"] = True
+            result["detection_method"] = "stop_reason=tool_use"
+            result["error"] = "stop_reason=tool_use 但无 tool_use block（异常）"
+        else:
+            texts = [b.get("text", "") for b in content if b.get("type") == "text"]
+            result["error"] = "响应中无 tool_use"
+            if texts:
+                result["error"] += f"\n模型文本回复: {texts[0][:300]}"
+
+    except requests.exceptions.Timeout:
+        result["error"] = f"请求超时 ({timeout}s)"
+    except requests.exceptions.ConnectionError as e:
+        result["error"] = f"连接失败: {e}"
+    except json.JSONDecodeError:
+        result["error"] = f"响应非 JSON: {resp.text[:300]}"
+    except Exception as e:
+        result["error"] = f"未知错误: {e}"
+
+    return result
+
+
 def check_single(base_url, api_key, model, tools, prompt, timeout=30,
                  verify_ssl=True, tool_choice=None):
-    """发送一次带 tools 的请求，返回解析后的结果 dict"""
+    """发送一次带 tools 的请求，自动路由 OpenAI/Anthropic"""
+    if _is_anthropic(base_url):
+        return _check_single_anthropic(base_url, api_key, model, tools, prompt,
+                                       timeout, verify_ssl, tool_choice)
+
     url = _build_url(base_url)
     payload = {
         "model": model,

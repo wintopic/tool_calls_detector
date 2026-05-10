@@ -9,7 +9,8 @@
 - **`tool_choice` 测试** — 支持 `auto` / `required` / 指定函数名三种模式
 - **并行调用检测** — 识别模型是否支持一次返回多个 tool_calls
 - **批量模型测试** — 逗号分隔输入多个模型名，逐个检测并汇总结果
-- **预设 API** — 一键切换 OpenAI / Kimi (Moonshot) / DeepSeek / 硅基流动
+- **预设 API** — 一键切换 OpenAI / Anthropic / Kimi (Moonshot) / DeepSeek / 硅基流动
+- **双协议支持** — 自动识别 OpenAI 兼容接口和 Anthropic Messages API
 - **自定义 API** — 支持任意 OpenAI 兼容的 Base URL
 - **SSL 跳过** — 默认勾选，兼容自签证书和代理环境
 - **可拖拽分割面板** — 左侧结果表格 + 右侧响应详情，比例自由调整
@@ -40,12 +41,13 @@
 
 ## 预设 API
 
-| 预设 | Base URL | 默认模型 |
-|------|----------|----------|
-| OpenAI | `https://api.openai.com` | gpt-4o, gpt-4o-mini, gpt-3.5-turbo |
-| Kimi (Moonshot) | `https://api.moonshot.cn` | kimi-k2.6, moonshot-v1-8k |
-| DeepSeek | `https://api.deepseek.com` | deepseek-chat, deepseek-reasoner |
-| 硅基流动 | `https://api.siliconflow.cn` | Qwen/Qwen2.5-7B-Instruct |
+| 预设 | Base URL | 默认模型 | 协议 |
+|------|----------|----------|------|
+| OpenAI | `https://api.openai.com` | gpt-4o, gpt-4o-mini, gpt-3.5-turbo | OpenAI |
+| Anthropic | `https://api.anthropic.com` | claude-sonnet-4, claude-haiku-4 | Messages API |
+| Kimi (Moonshot) | `https://api.moonshot.cn` | kimi-k2.6, moonshot-v1-8k | OpenAI |
+| DeepSeek | `https://api.deepseek.com` | deepseek-chat, deepseek-reasoner | OpenAI |
+| 硅基流动 | `https://api.siliconflow.cn` | Qwen/Qwen2.5-7B-Instruct | OpenAI |
 
 也可手动填写任意兼容 OpenAI 接口的 Base URL。
 
