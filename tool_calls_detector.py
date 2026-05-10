@@ -131,7 +131,126 @@ TOOLSET_MULTI = {
     "prompt": "What is Tesla's current stock price? Also calculate 15% of 2400.",
 }
 
-ALL_TOOLSETS = [TOOLSET_ARITHMETIC, TOOLSET_WEATHER, TOOLSET_SEARCH, TOOLSET_MULTI]
+# tool_choice=required 强制模型必须调用工具
+TOOLSET_FORCED = {
+    "name": "强制调用",
+    "tools": [{
+        "type": "function",
+        "function": {
+            "name": "get_time",
+            "description": "Get the current server time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "timezone": {"type": "string", "description": "Timezone like UTC, Asia/Shanghai"}
+                },
+                "required": ["timezone"]
+            }
+        }
+    }],
+    "prompt": "Hello!",
+    "tool_choice": "required",
+}
+
+# tool_choice 指定具体函数
+TOOLSET_FORCED_NAME = {
+    "name": "指定函数",
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "greet",
+                "description": "Greet a user by name.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "User name"}
+                    },
+                    "required": ["name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "farewell",
+                "description": "Say goodbye to a user.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "User name"}
+                    },
+                    "required": ["name"]
+                }
+            }
+        }
+    ],
+    "prompt": "The user's name is Alice.",
+    "tool_choice": {"type": "function", "function": {"name": "greet"}},
+}
+
+# 并行调用：prompt 需要同时用两个工具
+TOOLSET_PARALLEL = {
+    "name": "并行调用",
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_temperature",
+                "description": "Get temperature for a city.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"}
+                    },
+                    "required": ["city"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_humidity",
+                "description": "Get humidity for a city.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"}
+                    },
+                    "required": ["city"]
+                }
+            }
+        }
+    ],
+    "prompt": "Tell me the temperature and humidity in both Beijing and Tokyo.",
+}
+
+# strict schema：带 enum、description 等精细约束
+TOOLSET_STRICT = {
+    "name": "严格 Schema",
+    "tools": [{
+        "type": "function",
+        "function": {
+            "name": "create_task",
+            "description": "Create a new task with priority and category.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Task title"},
+                    "priority": {"type": "string", "enum": ["low", "medium", "high", "urgent"], "description": "Task priority"},
+                    "due_days": {"type": "integer", "description": "Days from now until due", "minimum": 0}
+                },
+                "required": ["title", "priority", "due_days"],
+                "additionalProperties": False
+            }
+        }
+    }],
+    "prompt": "Create a high-priority task to review the API documentation, due in 3 days.",
+}
+
+ALL_TOOLSETS = [TOOLSET_ARITHMETIC, TOOLSET_WEATHER, TOOLSET_SEARCH, TOOLSET_MULTI,
+                TOOLSET_FORCED, TOOLSET_FORCED_NAME, TOOLSET_PARALLEL, TOOLSET_STRICT]
 
 # ── 预设 API ─────────────────────────────────────────────────────────
 
@@ -152,7 +271,8 @@ def _build_url(base_url: str) -> str:
     return b + "/v1/chat/completions"
 
 
-def check_single(base_url, api_key, model, tools, prompt, timeout=30, verify_ssl=True):
+def check_single(base_url, api_key, model, tools, prompt, timeout=30,
+                 verify_ssl=True, tool_choice=None):
     """发送一次带 tools 的请求，返回解析后的结果 dict"""
     url = _build_url(base_url)
     payload = {
@@ -160,6 +280,8 @@ def check_single(base_url, api_key, model, tools, prompt, timeout=30, verify_ssl
         "messages": [{"role": "user", "content": prompt}],
         "tools": tools,
     }
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -177,6 +299,8 @@ def check_single(base_url, api_key, model, tools, prompt, timeout=30, verify_ssl
         "error": None,
         "latency": None,
         "status_code": None,
+        "parallel_count": 0,
+        "tool_choice_used": tool_choice,
     }
 
     try:
@@ -213,10 +337,13 @@ def check_single(base_url, api_key, model, tools, prompt, timeout=30, verify_ssl
             result["supported"] = True
             result["detection_method"] = "message.tool_calls"
             result["tool_calls"] = tool_calls
+            result["parallel_count"] = len(tool_calls)
             first = tool_calls[0]
             func = first.get("function", {})
             result["function_name"] = func.get("name")
             result["arguments"] = func.get("arguments")
+            if len(tool_calls) > 1:
+                result["function_name"] += f" (+{len(tool_calls)-1})"
             return result
 
         # 策略 2: finish_reason == "tool_calls"
@@ -256,7 +383,8 @@ def check_model(base_url, api_key, model, timeout=30, verify_ssl=True,
     for ts in toolsets:
         r = check_single(base_url, api_key, model,
                          ts["tools"], ts["prompt"],
-                         timeout=timeout, verify_ssl=verify_ssl)
+                         timeout=timeout, verify_ssl=verify_ssl,
+                         tool_choice=ts.get("tool_choice"))
         r["toolset_name"] = ts["name"]
         sub_results.append(r)
 
@@ -608,6 +736,12 @@ class ToolCallsDetectorApp:
             _kv(t, "Arguments", r["arguments"])
         if r.get("latency"):
             _kv(t, "Latency", f"{r['latency']}s")
+        pc = r.get("parallel_count", 0)
+        if pc > 1:
+            _kv(t, "Parallel Calls", str(pc))
+        tc = r.get("tool_choice_used")
+        if tc is not None:
+            _kv(t, "tool_choice", json.dumps(tc, ensure_ascii=False) if isinstance(tc, dict) else str(tc))
         _ins(t, "\n")
 
         # ── 各组详情 ──
@@ -625,12 +759,19 @@ class ToolCallsDetectorApp:
                     _kv(t, "  Function", sr.get("function_name", "-"))
                     _kv(t, "  Args", sr.get("arguments", "-"))
                     _kv(t, "  finish_reason", sr.get("finish_reason", "-"))
+                    pc = sr.get("parallel_count", 0)
+                    if pc > 1:
+                        _kv(t, "  Parallel", str(pc))
                 else:
                     err = sr.get("error", "-")
                     _ins(t, f"    Error: ", "key")
                     _ins(t, f"{err}\n\n", "error")
                 if sr.get("latency"):
                     _kv(t, "  Latency", f"{sr['latency']}s")
+                tc = sr.get("tool_choice_used")
+                if tc is not None:
+                    tc_str = json.dumps(tc, ensure_ascii=False) if isinstance(tc, dict) else str(tc)
+                    _kv(t, "  tool_choice", tc_str)
                 _ins(t, "\n")
 
         # ── 错误汇总（仅全部失败时） ──
